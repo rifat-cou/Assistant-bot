@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["ffmpeg"]
+nixPkgs = ["ffmpeg", "poppler_utils"]
 
 [start]
-cmd = "python bot.py"
+cmd = "python telegram_bot.py"
