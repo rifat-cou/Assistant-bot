@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import logging
 from datetime import datetime
+from gemini_vision import read_image_with_gemini
 from assistant_core import (
     CATEGORIES,
     build_categorize_prompt,
@@ -199,35 +200,7 @@ User message:
     @staticmethod
     def read_image(image_path_or_url: str, is_url: bool = False) -> str:
         """Gemini Vision — always use Gemini for images (best free OCR)."""
-        if is_url:
-            img_data = requests.get(image_path_or_url, timeout=15).content
-        else:
-            with open(image_path_or_url, "rb") as f:
-                img_data = f.read()
-
-        img_b64 = base64.b64encode(img_data).decode("utf-8")
-
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"inlineData": {"mimeType": "image/jpeg", "data": img_b64}},
-                    {"text": (
-                        "This image may contain Bengali (Bangla) and/or English text. "
-                        "Please: 1) Extract ALL text visible exactly as written — preserve Bengali script. "
-                        "2) List any URLs, website names, or tool names you see. "
-                        "3) Describe what type of content this is (screenshot of website, slide, social post, etc.). "
-                        "4) Note the language(s). Be thorough — miss nothing."
-                    )}
-                ]
-            }]
-        }
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
-            json=payload, timeout=30
-        )
-        if r.status_code == 200:
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        raise RuntimeError(f"Gemini Vision {r.status_code}: {r.text[:150]}")
+        return read_image_with_gemini(image_path_or_url, gemini_key=GEMINI_KEY, is_url=is_url)
 
 
 llm = LLMRouter()

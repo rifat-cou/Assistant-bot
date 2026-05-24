@@ -60,6 +60,9 @@ Important:
 - CONTENT TYPE means the form: screenshot, website, video, PDF, Facebook post, reading note, schedule.
 - CATEGORY means the topic/purpose: Scholarship, Research, AI Tools, Course, Academic, Reading Note, Schedule, etc.
 - A screenshot about scholarship is content_type "Screenshot" and category "Scholarship".
+- Never use "Scholarship" just because an image contains words like apply, admission, university, deadline, or opportunity. Use Scholarship only when the content clearly offers funding, stipend, tuition waiver, fellowship, grant, scholarship, or financial aid.
+- University admission notices, exam notices, class routines, academic forms, and campus announcements should usually be Academic, Course, Schedule, or Task.
+- AI tool screenshots, website screenshots, app pages, and tool lists should usually be AI Tools or Website, not Scholarship.
 - If unsure, set confidence below 0.70 and needs_review true.
 - Detect deadlines, schedules, tasks, links, tool names, and next action.
 
@@ -160,6 +163,8 @@ def normalize_ai_data(data: dict, source: str = "", text: str = "") -> dict:
     content_type = data.get("content_type") or infer_content_type(source)
     if content_type not in CONTENT_TYPES:
         content_type = infer_content_type(source)
+    if source in {"image", "screenshot"}:
+        content_type = "Screenshot"
 
     try:
         confidence = float(data.get("confidence", 0.7))
@@ -167,7 +172,8 @@ def normalize_ai_data(data: dict, source: str = "", text: str = "") -> dict:
         confidence = 0.7
     confidence = max(0.0, min(1.0, confidence))
 
-    needs_review = bool(data.get("needs_review", False)) or confidence < 0.7 or category == "Unknown"
+    category, confidence, forced_review = correct_overeager_scholarship(category, confidence, text)
+    needs_review = bool(data.get("needs_review", False)) or forced_review or confidence < 0.7 or category == "Unknown"
 
     sub_tags = data.get("sub_tags") or []
     if isinstance(sub_tags, str):
@@ -215,3 +221,34 @@ def split_long_message(text: str, limit: int = 3900) -> list:
         chunks.append(remaining[:split_at].strip())
         remaining = remaining[split_at:].strip()
     return chunks
+
+
+def correct_overeager_scholarship(category: str, confidence: float, text: str) -> tuple:
+    if category != "Scholarship":
+        return category, confidence, False
+
+    lower = (text or "").lower()
+    strong_scholarship_terms = [
+        "scholarship",
+        "fellowship",
+        "grant",
+        "stipend",
+        "tuition waiver",
+        "financial aid",
+        "fully funded",
+        "partial funded",
+        "funded",
+        "erasmus",
+        "daad",
+        "chevening",
+        "fulbright",
+    ]
+    weak_opportunity_terms = ["apply", "deadline", "admission", "university", "program", "notice", "circular"]
+
+    has_strong_signal = any(term in lower for term in strong_scholarship_terms)
+    has_weak_signal = any(term in lower for term in weak_opportunity_terms)
+    if has_strong_signal:
+        return category, confidence, False
+    if has_weak_signal:
+        return "Academic", min(confidence, 0.62), True
+    return "Unknown", min(confidence, 0.5), True

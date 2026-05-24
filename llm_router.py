@@ -1,10 +1,10 @@
-import base64
 import os
 import subprocess
 
 import requests
 
 from classifier import build_categorize_prompt, clean_json_response, normalize_ai_data
+from gemini_vision import read_image_with_gemini
 
 
 class LLMRouter:
@@ -113,52 +113,7 @@ User message:
         return "I could not answer right now. Try again in a moment."
 
     def read_image(self, image_path_or_url: str, is_url: bool = False) -> str:
-        if not self.gemini_key:
-            raise RuntimeError("GEMINI_API_KEY is not set")
-        if is_url:
-            response = requests.get(image_path_or_url, timeout=15)
-            img_data = response.content
-            content_type = response.headers.get("Content-Type", "image/jpeg")
-        else:
-            with open(image_path_or_url, "rb") as f:
-                img_data = f.read()
-            content_type = "image/jpeg"
-
-        if "png" in content_type:
-            mime = "image/png"
-        elif "webp" in content_type:
-            mime = "image/webp"
-        elif "gif" in content_type:
-            mime = "image/gif"
-        else:
-            mime = "image/jpeg"
-
-        img_b64 = base64.b64encode(img_data).decode("utf-8")
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"inlineData": {"mimeType": mime, "data": img_b64}},
-                        {
-                            "text": (
-                                "This image may contain Bengali and/or English text. "
-                                "Extract all visible text exactly. List URLs, website names, "
-                                "tool names, and describe whether it is a screenshot, photo, "
-                                "infographic, social post, notice, or other content."
-                            )
-                        },
-                    ]
-                }
-            ]
-        }
-        r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.gemini_key}",
-            json=payload,
-            timeout=30,
-        )
-        if r.status_code == 200:
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        raise RuntimeError(f"Gemini Vision {r.status_code}: {r.text[:150]}")
+        return read_image_with_gemini(image_path_or_url, gemini_key=self.gemini_key, is_url=is_url)
 
     def transcribe_audio(self, audio_path: str) -> str:
         if not self.groq_key:

@@ -12,6 +12,7 @@ import os
 import re
 from notion_client import Client
 from datetime import datetime
+from gemini_vision import read_image_with_gemini
 from assistant_core import (
     CATEGORIES,
     build_categorize_prompt,
@@ -302,42 +303,7 @@ def extract_text_from_image_gemini(image_url: str) -> str:
     Works for: Bengali photocards, English infographics, screenshots of posts.
     """
     try:
-        # Download image and encode as base64
-        import base64
-        img_response = requests.get(image_url, timeout=15)
-        img_b64 = base64.b64encode(img_response.content).decode("utf-8")
-
-        # Detect MIME type
-        content_type = img_response.headers.get("Content-Type", "image/jpeg")
-        if "png" in content_type:
-            mime = "image/png"
-        elif "webp" in content_type:
-            mime = "image/webp"
-        elif "gif" in content_type:
-            mime = "image/gif"
-        else:
-            mime = "image/jpeg"
-
-        # Call Gemini Vision
-        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-        payload = {
-            "contents": [{
-                "parts": [
-                    {
-                        "inlineData": {
-                            "mimeType": mime,
-                            "data": img_b64
-                        }
-                    },
-                    {
-                        "text": "This image may contain Bengali (Bangla) or English text, or both. Please: 1) Extract ALL text visible in the image exactly as written. 2) Describe what the image shows (photo, infographic, screenshot, etc.). 3) Note the language(s) used. Return everything you see."
-                    }
-                ]
-            }]
-        }
-        r = requests.post(api_url, json=payload, timeout=30)
-        data = r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        return read_image_with_gemini(image_url, gemini_key=GEMINI_KEY, is_url=True)
     except Exception as e:
         return f"Could not read image text: {str(e)}"
 
