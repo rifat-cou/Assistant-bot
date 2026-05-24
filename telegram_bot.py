@@ -13,6 +13,14 @@ import tempfile
 import logging
 from datetime import datetime
 from gemini_vision import read_image_with_gemini
+from bot_profile import (
+    BOT_NAME,
+    LONG_DESCRIPTION,
+    SHORT_DESCRIPTION,
+    TELEGRAM_COMMANDS,
+    about_text,
+    command_help_text,
+)
 from assistant_core import (
     CATEGORIES,
     build_categorize_prompt,
@@ -316,6 +324,29 @@ def process_video_file(file_path: str) -> dict:
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 FILE_URL = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}"
 
+
+def tg_setup_profile():
+    """Set Telegram command menu and bot descriptions."""
+    try:
+        requests.post(
+            f"{BASE_URL}/setMyCommands",
+            json={"commands": [{"command": name, "description": desc} for name, desc in TELEGRAM_COMMANDS]},
+            timeout=15,
+        )
+        requests.post(
+            f"{BASE_URL}/setMyShortDescription",
+            json={"short_description": SHORT_DESCRIPTION[:120]},
+            timeout=15,
+        )
+        requests.post(
+            f"{BASE_URL}/setMyDescription",
+            json={"description": LONG_DESCRIPTION[:512]},
+            timeout=15,
+        )
+    except Exception as e:
+        log.warning(f"Telegram profile setup failed: {e}")
+
+
 def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown"):
     """Send a message to Telegram."""
     for chunk in split_long_message(text):
@@ -410,22 +441,29 @@ def handle_update(update: dict):
 
             # Commands
             if text == "/start":
-                tg_send(chat_id, (
-                    "👋 *Campus Assistant* is ready\\!\n\n"
-                    "Just send me:\n"
-                    "• 📸 *Screenshot* → I read all text with AI Vision\n"
-                    "• 🎬 *Video* → I transcribe speech \\(Bangla \\+ English\\)\n"
-                    "• 🔗 *Link* → I fetch and organize it\n"
-                    "• 📝 *Copied text* → I categorize and save it\n"
-                    "• 📄 *PDF* → I extract and organize content\n\n"
-                    "Commands:\n"
-                    "• /ask your question → answer only\n"
-                    "• /chat message → fun/casual chat\n"
-                    "• /note your reading note → save as Reading Note\n"
-                    "• /schedule tomorrow 8pm read paper → save as Schedule\n"
-                    "• /fixcategory latest Scholarship → fix latest item\n\n"
-                    "_No commands needed for saving files\\. Just send the file\\._"
-                ), parse_mode="MarkdownV2")
+                tg_send(
+                    chat_id,
+                    (
+                        f"{BOT_NAME} is ready.\n\n"
+                        f"{SHORT_DESCRIPTION}\n\n"
+                        "Send me:\n"
+                        "- Screenshot or image: OCR + summary + Notion save\n"
+                        "- Video or voice: transcript + analysis\n"
+                        "- Link: fetch + organize\n"
+                        "- PDF: extract text + summarize\n"
+                        "- Copied text: classify + save\n\n"
+                        "Use /help for commands and /about for details."
+                    ),
+                    parse_mode="",
+                )
+                return
+
+            if text == "/help":
+                tg_send(chat_id, command_help_text("telegram"), parse_mode="")
+                return
+
+            if text == "/about":
+                tg_send(chat_id, about_text(), parse_mode="")
                 return
 
             if text.startswith("/ask "):
@@ -675,6 +713,7 @@ def handle_update(update: dict):
 def run_bot():
     """Long-polling loop — checks for new messages every 2 seconds."""
     log.info("Campus Assistant Telegram Bot starting...")
+    tg_setup_profile()
     offset = 0
 
     while True:

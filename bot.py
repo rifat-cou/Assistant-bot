@@ -13,6 +13,7 @@ import re
 from notion_client import Client
 from datetime import datetime
 from gemini_vision import read_image_with_gemini
+from bot_profile import BOT_NAME, DISCORD_COMMANDS, LONG_DESCRIPTION, SERVER_DESCRIPTION, SHORT_DESCRIPTION
 from assistant_core import (
     CATEGORIES,
     build_categorize_prompt,
@@ -571,22 +572,22 @@ async def process_and_save(interaction_or_message, content: str, source_type: st
 #  DISCORD COMMANDS
 # ═════════════════════════════════════════════════════════════
 
-@tree.command(name="save", description="Save any link — YouTube, Facebook, article, research paper")
-@app_commands.describe(url="Paste the link you want to save")
+@tree.command(name="save", description="Save and organize any link into Notion")
+@app_commands.describe(url="Paste a YouTube, Facebook, article, paper, course, tool, or website link")
 async def save_cmd(interaction: discord.Interaction, url: str):
     await interaction.response.defer(thinking=True)
     await process_and_save(interaction, url.strip())
 
 
-@tree.command(name="note", description="Save copied text — Facebook post text, article text, any notes")
-@app_commands.describe(text="Paste the text you copied from Facebook, LinkedIn, anywhere")
+@tree.command(name="note", description="Save copied text, captions, posts, or quick notes")
+@app_commands.describe(text="Paste copied text from Facebook, LinkedIn, articles, captions, or quick notes")
 async def note_cmd(interaction: discord.Interaction, text: str):
     await interaction.response.defer(thinking=True)
     await process_and_save(interaction, text.strip(), source_type="text")
 
 
-@tree.command(name="reading_note", description="Save a reading note separately from normal text")
-@app_commands.describe(text="Your reading note")
+@tree.command(name="reading_note", description="Save study, book, paper, or course notes")
+@app_commands.describe(text="Your reading note, class note, paper note, or learning reflection")
 async def reading_note_cmd(interaction: discord.Interaction, text: str):
     await interaction.response.defer(thinking=True)
     ai_data = categorize_with_ai(text.strip(), source_type="note")
@@ -598,8 +599,8 @@ async def reading_note_cmd(interaction: discord.Interaction, text: str):
     await interaction.followup.send(embed=build_embed(ai_data, "", "text"))
 
 
-@tree.command(name="schedule", description="Save a schedule, reminder, routine, or planned task")
-@app_commands.describe(text="Example: tomorrow 8pm read paper")
+@tree.command(name="schedule", description="Save a routine, reminder, deadline, or task")
+@app_commands.describe(text="Example: tomorrow 8pm read paper, IELTS class Friday, scholarship deadline May 30")
 async def schedule_cmd(interaction: discord.Interaction, text: str):
     await interaction.response.defer(thinking=True)
     ai_data = categorize_with_ai(text.strip(), source_type="schedule")
@@ -612,8 +613,8 @@ async def schedule_cmd(interaction: discord.Interaction, text: str):
     await interaction.followup.send(embed=build_embed(ai_data, "", "text"))
 
 
-@tree.command(name="ask", description="Ask the assistant without saving to Notion")
-@app_commands.describe(question="Your question")
+@tree.command(name="ask", description="Ask a question without saving anything")
+@app_commands.describe(question="Your question. This will not be saved to Notion")
 async def ask_cmd(interaction: discord.Interaction, question: str):
     await interaction.response.defer(thinking=True)
     try:
@@ -623,8 +624,8 @@ async def ask_cmd(interaction: discord.Interaction, question: str):
         await interaction.followup.send(f"❌ Answer error: `{str(e)}`")
 
 
-@tree.command(name="chat", description="Casual/fun chat without saving to Notion")
-@app_commands.describe(message="Say anything")
+@tree.command(name="chat", description="Casual or fun chat without saving anything")
+@app_commands.describe(message="Say anything. This will not be saved to Notion")
 async def chat_cmd(interaction: discord.Interaction, message: str):
     await interaction.response.defer(thinking=True)
     try:
@@ -634,8 +635,8 @@ async def chat_cmd(interaction: discord.Interaction, message: str):
         await interaction.followup.send(f"❌ Chat error: `{str(e)}`")
 
 
-@tree.command(name="fixcategory", description="Fix the category of your latest saved item")
-@app_commands.describe(target="Use latest for now", category="New category name, e.g. Scholarship")
+@tree.command(name="fixcategory", description="Correct the category of the latest saved item")
+@app_commands.describe(target="Use latest for now", category="New category, e.g. Scholarship, Academic, AI Tools")
 async def fixcategory_cmd(interaction: discord.Interaction, target: str, category: str):
     await interaction.response.defer(thinking=True)
     category = normalize_category(category)
@@ -663,8 +664,8 @@ async def fixcategory_cmd(interaction: discord.Interaction, target: str, categor
         await interaction.followup.send(f"❌ Category update error: `{str(e)}`")
 
 
-@tree.command(name="find", description="Search your saved content with natural language")
-@app_commands.describe(query="What are you looking for? (e.g. scholarship UK 2025, free AI tools)")
+@tree.command(name="find", description="Search your Notion content vault")
+@app_commands.describe(query="What are you looking for? Example: scholarship UK 2025, free AI tools, research paper")
 async def find_cmd(interaction: discord.Interaction, query: str):
     await interaction.response.defer(thinking=True)
     try:
@@ -707,8 +708,8 @@ async def find_cmd(interaction: discord.Interaction, query: str):
         await interaction.followup.send(f"❌ Search error: `{str(e)}`")
 
 
-@tree.command(name="list", description="Show all saved content in one category")
-@app_commands.describe(category="Category name — Scholarship, Research, AI Tools, Video, Social Post, etc.")
+@tree.command(name="list", description="Show saved items from one category")
+@app_commands.describe(category="Category name: Scholarship, Research, AI Tools, Academic, Course, Reading Note, Schedule")
 async def list_cmd(interaction: discord.Interaction, category: str):
     await interaction.response.defer(thinking=True)
     try:
@@ -744,7 +745,7 @@ async def list_cmd(interaction: discord.Interaction, category: str):
         await interaction.followup.send(f"❌ Error: `{str(ex)}`")
 
 
-@tree.command(name="deadlines", description="Show all upcoming deadlines from saved scholarships and applications")
+@tree.command(name="deadlines", description="Show upcoming deadlines from saved items")
 async def deadlines_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     try:
@@ -772,8 +773,8 @@ async def deadlines_cmd(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Error: `{str(ex)}`")
 
 
-@tree.command(name="recent", description="Show recently saved items")
-@app_commands.describe(count="How many items to show (max 10, default 5)")
+@tree.command(name="recent", description="Show your recently saved items")
+@app_commands.describe(count="How many items to show, max 10")
 async def recent_cmd(interaction: discord.Interaction, count: int = 5):
     await interaction.response.defer(thinking=True)
     try:
@@ -797,7 +798,7 @@ async def recent_cmd(interaction: discord.Interaction, count: int = 5):
         await interaction.followup.send(f"❌ Error: `{str(ex)}`")
 
 
-@tree.command(name="stats", description="See your content library statistics")
+@tree.command(name="stats", description="Show your content library statistics")
 async def stats_cmd(interaction: discord.Interaction):
     await interaction.response.defer(thinking=True)
     try:
@@ -821,24 +822,26 @@ async def stats_cmd(interaction: discord.Interaction):
         await interaction.followup.send(f"❌ Error: `{str(ex)}`")
 
 
-@tree.command(name="help", description="Show all commands and how to use them")
+@tree.command(name="about", description="Show what Campus Assistant does")
+async def about_cmd(interaction: discord.Interaction):
+    e = discord.Embed(title=BOT_NAME, description=LONG_DESCRIPTION, color=0x1D9E75)
+    e.add_field(name="Good for", value=SHORT_DESCRIPTION, inline=False)
+    e.add_field(name="Server description", value=SERVER_DESCRIPTION[:900], inline=False)
+    await interaction.response.send_message(embed=e)
+
+
+@tree.command(name="help", description="Show all commands and examples")
 async def help_cmd(interaction: discord.Interaction):
-    e = discord.Embed(title="🤖 Campus Assistant — Commands", color=0x5865F2)
-    e.add_field(name="/save [url]", value="Save any link — YouTube, articles, research papers\nFacebook/Instagram links: saves what it can", inline=False)
-    e.add_field(name="/note [text]", value="**Best for Facebook posts** — copy the post text and paste here\nAlso for LinkedIn, TikTok captions, any copied text", inline=False)
-    e.add_field(name="/reading_note [text]", value="Save study notes separately as Reading Note", inline=False)
-    e.add_field(name="/schedule [text]", value="Save routines, deadlines, reminders, or tasks", inline=False)
-    e.add_field(name="/ask [question]", value="Ask something without saving it", inline=False)
-    e.add_field(name="/chat [message]", value="Casual/fun chat without saving it", inline=False)
-    e.add_field(name="/fixcategory latest [category]", value="Fix the latest saved item's class if AI was unsure", inline=False)
-    e.add_field(name="📸 Drop an image", value="Upload any image or photocard directly in this channel\nBot reads all text (Bangla + English) using AI vision", inline=False)
-    e.add_field(name="/find [query]", value="Search your saved content: `/find scholarship UK`", inline=False)
-    e.add_field(name="/list [category]", value="List by category: `/list Scholarship` `/list Video`", inline=False)
-    e.add_field(name="/deadlines", value="Show all items with upcoming deadlines", inline=False)
-    e.add_field(name="/recent [n]", value="Show last N saved items", inline=False)
-    e.add_field(name="/stats", value="See your library breakdown by category", inline=False)
+    e = discord.Embed(title=f"{BOT_NAME} Commands", description=SHORT_DESCRIPTION, color=0x5865F2)
+    for command, description in DISCORD_COMMANDS:
+        e.add_field(name=command, value=description, inline=False)
     e.add_field(
-        name="⚠️ Facebook tip",
+        name="Drop files directly",
+        value="Upload screenshots or images in this channel. The bot reads Bangla and English text, detects content type, and saves to Notion.",
+        inline=False
+    )
+    e.add_field(
+        name="Facebook tip",
         value="Facebook blocks link reading. For best results:\n1. Copy the post text on Facebook\n2. Use `/note [paste text here]`",
         inline=False
     )
