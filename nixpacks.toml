@@ -2,4 +2,5 @@
 nixPkgs = ["ffmpeg", "poppler_utils"]
 
 [start]
-cmd = "python telegram_bot.py"
+[start]
+cmd = "python main.py"
