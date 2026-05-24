@@ -6,13 +6,20 @@ Storage: Notion database (same one as Discord bot)
 """
 
 import os
-import json
 import requests
 import base64
 import subprocess
 import tempfile
 import logging
 from datetime import datetime
+from assistant_core import (
+    CATEGORIES,
+    build_categorize_prompt,
+    clean_json_response,
+    normalize_ai_data,
+    normalize_category,
+    split_long_message,
+)
 
 # ─────────────────────────────────────────────────────────────
 #  CREDENTIALS — set these in Railway environment variables
@@ -29,6 +36,23 @@ notion = Client(auth=NOTION_SECRET)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+_notion_property_cache = None
+
+
+def notion_properties() -> set:
+    global _notion_property_cache
+    if _notion_property_cache is None:
+        try:
+            db = notion.databases.retrieve(database_id=NOTION_DB_ID)
+            _notion_property_cache = set(db.get("properties", {}).keys())
+        except Exception:
+            _notion_property_cache = set()
+    return _notion_property_cache
+
+
+def add_prop_if_exists(props: dict, name: str, value: dict):
+    if name in notion_properties():
+        props[name] = value
 
 # ─────────────────────────────────────────────────────────────
 #  MULTI-LLM ROUTER — tries providers in order, falls back
@@ -101,8 +125,8 @@ class LLMRouter:
         ]:
             try:
                 raw = provider_fn(prompt, max_tokens=700)
-                raw = raw.replace("```json", "").replace("```", "").strip()
-                result = json.loads(raw)
+                result = clean_json_response(raw)
+                result = normalize_ai_data(result, source=source, text=text)
                 result["_llm_used"] = provider_name
                 return result
             except Exception as e:
@@ -111,7 +135,11 @@ class LLMRouter:
         # Hard fallback — return minimal structure
         return {
             "title": f"Saved content from {source}",
-            "category": "Social Post",
+            "category": "Unknown",
+            "content_type": "Unknown",
+            "confidence": 0.0,
+            "needs_review": True,
+            "possible_categories": ["Academic", "Learning", "Archive"],
             "sub_tags": [source or "saved"],
             "language": "Both",
             "summary_en": text[:200],
@@ -123,6 +151,23 @@ class LLMRouter:
             "keywords": [],
             "_llm_used": "fallback"
         }
+
+    @classmethod
+    def answer(cls, message: str, playful: bool = False) -> str:
+        tone = "friendly, playful, and casual" if playful else "helpful, concise, and practical"
+        prompt = f"""You are Marof's personal assistant bot.
+
+Reply in a {tone} way. You can use Bangla, English, or mixed Banglish depending on the user's message.
+Do not save anything to Notion. Just answer the user.
+
+User message:
+{message[:3000]}"""
+        for provider_fn in [cls.call_groq, cls.call_deepseek]:
+            try:
+                return provider_fn(prompt, max_tokens=900)
+            except Exception as e:
+                log.warning(f"Answer provider failed: {e}")
+        return "I could not answer right now. Try again in a moment."
 
     @staticmethod
     def transcribe_audio(audio_path: str) -> str:
@@ -192,29 +237,8 @@ llm = LLMRouter()
 # ─────────────────────────────────────────────────────────────
 
 def build_categorize_prompt(text: str, source: str = "") -> str:
-    return f"""You are a personal content organizer for Marof, a Bangladeshi student building "AI Campus" — an AI education platform.
-
-Content source type: {source}
-Content text (may be in Bangla, English, or both):
-{text[:2500]}
-
-Analyze carefully. Return ONLY valid JSON, no markdown, no explanation:
-{{
-  "title": "clear descriptive title in English, max 12 words",
-  "category": "pick exactly one: Scholarship | Research | AI Tools | Tech News | Learning | Career | Video | Image | Social Post | Paper | Template | Idea | News | Website | URL List",
-  "sub_tags": ["tag1", "tag2", "tag3"],
-  "language": "Bangla | English | Both",
-  "summary_en": "2 clear sentences summarizing content in English",
-  "summary_bn": "২টি বাক্যে বাংলায় সারসংক্ষেপ (Bengali script)",
-  "relevance_score": 8.0,
-  "relevance_reason": "one sentence why this is relevant to an AI student in Bangladesh",
-  "has_deadline": false,
-  "deadline_date": null,
-  "action": "Apply | Read | Watch | Save only | Visit",
-  "extracted_urls": ["any URLs or website names found in the content"],
-  "extracted_tools": ["any tool names, app names, or software mentioned"],
-  "keywords": ["keyword1", "keyword2", "keyword3", "keyword4"]
-}}"""
+    from assistant_core import build_categorize_prompt as shared_prompt
+    return shared_prompt(text, source=source)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -243,6 +267,11 @@ def save_to_notion(ai_data: dict, source_url: str, raw_text: str, file_type: str
         "Raw Text":     {"rich_text": [{"text": {"content": raw_text[:2000]}}]},
         "Saved At":     {"date": {"start": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}},
     }
+    add_prop_if_exists(props, "Content Type", {"select": {"name": ai_data.get("content_type", file_type or "Unknown")}})
+    add_prop_if_exists(props, "Confidence", {"number": float(ai_data.get("confidence", 0.0))})
+    add_prop_if_exists(props, "Needs Review", {"checkbox": bool(ai_data.get("needs_review", False))})
+    add_prop_if_exists(props, "Source Platform", {"select": {"name": file_type or ai_data.get("content_type", "Unknown")}})
+
     if source_url:
         props["URL"] = {"url": source_url}
     if ai_data.get("deadline_date"):
@@ -316,12 +345,13 @@ FILE_URL = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}"
 
 def tg_send(chat_id: int, text: str, parse_mode: str = "Markdown"):
     """Send a message to Telegram."""
-    requests.post(f"{BASE_URL}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True
-    }, timeout=15)
+    for chunk in split_long_message(text):
+        requests.post(f"{BASE_URL}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }, timeout=15)
 
 def tg_download_file(file_id: str, suffix: str) -> str:
     """Download a file from Telegram servers to a temp file."""
@@ -343,6 +373,8 @@ def format_notion_reply(ai_data: dict, notion_url: str, file_type: str = "") -> 
     """Build the Telegram reply message with organized content."""
     provider = ai_data.get("_llm_used", "AI")
     score    = ai_data.get("relevance_score", "?")
+    confidence = ai_data.get("confidence", 0)
+    content_type = ai_data.get("content_type", file_type or "?")
     tags     = " ".join([f"`{t}`" for t in ai_data.get("sub_tags", [])[:5]])
     urls     = ai_data.get("extracted_urls", [])
     tools    = ai_data.get("extracted_tools", [])
@@ -358,6 +390,11 @@ def format_notion_reply(ai_data: dict, notion_url: str, file_type: str = "") -> 
         tool_list = ", ".join(tools[:6])
         tool_section = f"\n\n🛠 *Tools mentioned:* {tool_list}"
 
+    review_section = ""
+    if ai_data.get("needs_review"):
+        choices = ", ".join(ai_data.get("possible_categories", [])[:4]) or ", ".join(CATEGORIES[:6])
+        review_section = f"\n\n⚠️ *Needs review:* I am not fully sure about the class.\nPossible: {choices}\nUse `/fixcategory latest CategoryName` after saving."
+
     return f"""✅ *Saved & organized*
 
 📌 *{ai_data.get('title', 'Untitled')}*
@@ -368,14 +405,16 @@ def format_notion_reply(ai_data: dict, notion_url: str, file_type: str = "") -> 
 🇧🇩 *সারসংক্ষেপ:*
 {ai_data.get('summary_bn', '—')}
 
+🧾 *Type:* `{content_type}`
 🏷 *Category:* `{ai_data.get('category', '?')}`
 🌐 *Language:* `{ai_data.get('language', '?')}`
 ⭐ *Relevance:* `{score}/10`
+🎚 *Confidence:* `{confidence}`
 🎯 *Action:* `{ai_data.get('action', 'Save only')}`{deadline}
 🏷 *Tags:* {tags}{url_section}{tool_section}
 
 📒 [Open in Notion]({notion_url})
-🤖 _{provider}_"""
+🤖 _{provider}_{review_section}"""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -406,8 +445,70 @@ def handle_update(update: dict):
                     "• 🔗 *Link* → I fetch and organize it\n"
                     "• 📝 *Copied text* → I categorize and save it\n"
                     "• 📄 *PDF* → I extract and organize content\n\n"
-                    "_No commands needed\\. Just send the file\\._"
+                    "Commands:\n"
+                    "• /ask your question → answer only\n"
+                    "• /chat message → fun/casual chat\n"
+                    "• /note your reading note → save as Reading Note\n"
+                    "• /schedule tomorrow 8pm read paper → save as Schedule\n"
+                    "• /fixcategory latest Scholarship → fix latest item\n\n"
+                    "_No commands needed for saving files\\. Just send the file\\._"
                 ), parse_mode="MarkdownV2")
+                return
+
+            if text.startswith("/ask "):
+                answer = llm.answer(text[5:].strip(), playful=False)
+                tg_send(chat_id, answer, parse_mode="")
+                return
+
+            if text.startswith("/chat "):
+                answer = llm.answer(text[6:].strip(), playful=True)
+                tg_send(chat_id, answer, parse_mode="")
+                return
+
+            if text.startswith("/note "):
+                note_text = text[6:].strip()
+                tg_send(chat_id, "⏳ Saving reading note...")
+                ai_data = llm.categorize(note_text, source="note")
+                ai_data["category"] = "Reading Note"
+                ai_data["content_type"] = "Reading Note"
+                ai_data["confidence"] = max(float(ai_data.get("confidence", 0.7)), 0.9)
+                ai_data["needs_review"] = False
+                notion_url = save_to_notion(ai_data, "", note_text, "note")
+                tg_send(chat_id, format_notion_reply(ai_data, notion_url, "note"))
+                return
+
+            if text.startswith("/schedule "):
+                schedule_text = text[10:].strip()
+                tg_send(chat_id, "⏳ Saving schedule...")
+                ai_data = llm.categorize(schedule_text, source="schedule")
+                ai_data["category"] = "Schedule"
+                ai_data["content_type"] = "Schedule"
+                ai_data["action"] = "Add to schedule"
+                ai_data["confidence"] = max(float(ai_data.get("confidence", 0.7)), 0.9)
+                ai_data["needs_review"] = False
+                notion_url = save_to_notion(ai_data, "", schedule_text, "schedule")
+                tg_send(chat_id, format_notion_reply(ai_data, notion_url, "schedule"))
+                return
+
+            if text.startswith("/fixcategory latest "):
+                category = normalize_category(text.replace("/fixcategory latest ", "", 1).strip())
+                if category not in CATEGORIES:
+                    tg_send(chat_id, f"Unknown category. Use one of:\n{', '.join(CATEGORIES)}")
+                    return
+                results = notion.databases.query(
+                    database_id=NOTION_DB_ID,
+                    sorts=[{"property": "Saved At", "direction": "descending"}],
+                    page_size=1
+                )["results"]
+                if not results:
+                    tg_send(chat_id, "No saved item found.")
+                    return
+                page_id = results[0]["id"]
+                props = {"Category": {"select": {"name": category}}}
+                add_prop_if_exists(props, "Needs Review", {"checkbox": False})
+                add_prop_if_exists(props, "Confidence", {"number": 1.0})
+                notion.pages.update(page_id=page_id, properties=props)
+                tg_send(chat_id, f"✅ Latest item category updated to *{category}*.")
                 return
 
             if text == "/stats":
@@ -444,7 +545,7 @@ def handle_update(update: dict):
                 return
 
             if text.startswith("/list "):
-                category = text[6:].strip().title()
+                category = normalize_category(text[6:].strip())
                 results = notion.databases.query(
                     database_id=NOTION_DB_ID,
                     filter={"property": "Category", "select": {"equals": category}},

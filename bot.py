@@ -12,6 +12,13 @@ import os
 import re
 from notion_client import Client
 from datetime import datetime
+from assistant_core import (
+    CATEGORIES,
+    build_categorize_prompt,
+    clean_json_response,
+    normalize_ai_data,
+    normalize_category,
+)
 
 # ─────────────────────────────────────────────────────────────
 #  CREDENTIALS  (set these in Railway environment variables)
@@ -23,11 +30,28 @@ NOTION_SECRET  = os.environ["NOTION_SECRET"]
 NOTION_DB_ID   = os.environ["NOTION_DB_ID"]
 
 notion = Client(auth=NOTION_SECRET)
+_notion_property_cache = None
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
+
+
+def notion_properties() -> set:
+    global _notion_property_cache
+    if _notion_property_cache is None:
+        try:
+            db = notion.databases.retrieve(database_id=NOTION_DB_ID)
+            _notion_property_cache = set(db.get("properties", {}).keys())
+        except Exception:
+            _notion_property_cache = set()
+    return _notion_property_cache
+
+
+def add_prop_if_exists(props: dict, name: str, value: dict):
+    if name in notion_properties():
+        props[name] = value
 
 
 # ═════════════════════════════════════════════════════════════
@@ -327,30 +351,7 @@ def categorize_with_ai(content_text: str, url: str = "", source_type: str = "") 
     Send extracted content to Groq AI for categorization.
     Returns structured JSON with category, summaries, tags, deadline, etc.
     """
-    prompt = f"""You are a personal content organizer for Marof, a Bangladeshi student building "AI Campus" — an AI education platform.
-
-Content source: {source_type}
-URL: {url}
-Content text:
-{content_text[:2000]}
-
-Analyze this content carefully. The text might be in Bangla, English, or both.
-Return ONLY valid JSON, no other text, no markdown:
-
-{{
-  "title": "clear descriptive title in English, max 12 words",
-  "category": "pick EXACTLY one: Scholarship | Research | AI Tools | Tech News | Learning | Career | Video | Image | Social Post | Paper | Template | Idea | News",
-  "sub_tags": ["tag1", "tag2", "tag3"],
-  "language": "Bangla | English | Both",
-  "summary_en": "2 clear sentences summarizing the content in English",
-  "summary_bn": "2 sentences summarizing the content in Bengali script (বাংলায় লিখুন)",
-  "relevance_score": 7.5,
-  "relevance_reason": "one sentence: why is this relevant to an AI student in Bangladesh?",
-  "has_deadline": false,
-  "deadline_date": null,
-  "action": "Apply | Read | Watch | Save only",
-  "keywords": ["keyword1", "keyword2", "keyword3", "keyword4"]
-}}"""
+    prompt = build_categorize_prompt(content_text, source=source_type, url=url)
 
     try:
         r = requests.post(
@@ -365,14 +366,12 @@ Return ONLY valid JSON, no other text, no markdown:
             timeout=25
         )
         raw = r.json()["choices"][0]["message"]["content"].strip()
-        # Clean up in case model adds markdown fences
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(raw)
+        return normalize_ai_data(clean_json_response(raw), source=source_type, text=content_text)
     except json.JSONDecodeError:
         # AI returned something that's not valid JSON — build a fallback
-        return {
+        return normalize_ai_data({
             "title": f"Saved content from {source_type}",
-            "category": "Social Post" if source_type in ["facebook","instagram","tiktok"] else "News",
+            "category": "Unknown",
             "sub_tags": [source_type],
             "language": "Both",
             "summary_en": content_text[:200],
@@ -383,9 +382,33 @@ Return ONLY valid JSON, no other text, no markdown:
             "deadline_date": None,
             "action": "Read",
             "keywords": [source_type]
-        }
+        }, source=source_type, text=content_text)
     except Exception as e:
         raise RuntimeError(f"AI categorization failed: {str(e)}")
+
+
+def answer_with_ai(question: str, playful: bool = False) -> str:
+    """Answer without saving anything to Notion."""
+    tone = "friendly, playful, casual" if playful else "helpful, concise, practical"
+    prompt = f"""You are Marof's personal assistant bot.
+
+Reply in a {tone} way. You can use Bangla, English, or mixed Banglish depending on the user.
+Do not save anything to Notion. Just answer.
+
+User message:
+{question[:3000]}"""
+    r = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+        json={
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 900,
+            "temperature": 0.7 if playful else 0.2
+        },
+        timeout=25
+    )
+    return r.json()["choices"][0]["message"]["content"].strip()
 
 
 # ═════════════════════════════════════════════════════════════
@@ -408,6 +431,11 @@ def save_to_notion(ai_data: dict, url: str, raw_text: str) -> str:
         "Raw Text":    {"rich_text": [{"text": {"content": raw_text[:2000]}}]},
         "Saved At":    {"date": {"start": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")}},
     }
+    add_prop_if_exists(props, "Content Type", {"select": {"name": ai_data.get("content_type", "Unknown")}})
+    add_prop_if_exists(props, "Confidence", {"number": float(ai_data.get("confidence", 0.0))})
+    add_prop_if_exists(props, "Needs Review", {"checkbox": bool(ai_data.get("needs_review", False))})
+    add_prop_if_exists(props, "Source Platform", {"select": {"name": ai_data.get("content_type", "Unknown")}})
+
     if url:
         props["URL"] = {"url": url}
     if ai_data.get("deadline_date"):
@@ -426,7 +454,10 @@ CATEGORY_COLORS = {
     "Tech News": 0xEF9F27,   "Video": 0xD4537E,    "Learning": 0x639922,
     "Social Post": 0x185FA5, "Paper": 0x0F6E56,    "Career": 0x3B6D11,
     "Image": 0x8B7355,       "News": 0xCC5500,      "Template": 0x534AB7,
-    "Idea": 0xD4AF37
+    "Idea": 0xD4AF37,       "Academic": 0x3B82F6,  "Course": 0x14B8A6,
+    "Website": 0x64748B,    "URL List": 0x64748B,  "Reading Note": 0x22C55E,
+    "Schedule": 0xF97316,   "Task": 0xF59E0B,      "Fun Chat": 0xEC4899,
+    "Archive": 0x6B7280,    "Unknown": 0x991B1B
 }
 
 SOURCE_LABELS = {
@@ -464,8 +495,10 @@ def build_embed(ai_data: dict, url: str, source_type: str, warning: str = None) 
     embed.add_field(name="🇧🇩 সারসংক্ষেপ (বাংলা)", value=ai_data.get("summary_bn", "—")[:800], inline=False)
 
     embed.add_field(name="Category", value=f"`{ai_data.get('category','?')}`", inline=True)
+    embed.add_field(name="Type", value=f"`{ai_data.get('content_type','?')}`", inline=True)
     embed.add_field(name="Source", value=source_label, inline=True)
     embed.add_field(name="Relevance", value=f"`{ai_data.get('relevance_score', 5)}/10`", inline=True)
+    embed.add_field(name="Confidence", value=f"`{ai_data.get('confidence', 0)}`", inline=True)
 
     tags_str = "  ".join([f"`{t}`" for t in ai_data.get("sub_tags", [])[:5]])
     if tags_str:
@@ -475,6 +508,13 @@ def build_embed(ai_data: dict, url: str, source_type: str, warning: str = None) 
         embed.add_field(name="📅 Deadline", value=f"`{ai_data['deadline_date']}`", inline=True)
 
     embed.add_field(name="Action", value=f"`{ai_data.get('action', 'Save only')}`", inline=True)
+    if ai_data.get("needs_review"):
+        choices = ", ".join(ai_data.get("possible_categories", [])[:4]) or ", ".join(CATEGORIES[:5])
+        embed.add_field(
+            name="⚠️ Needs review",
+            value=f"I am not fully sure about the class. Possible: `{choices}`\nUse `/fixcategory latest category`.",
+            inline=False
+        )
     embed.set_footer(text=f"Saved to Notion · AI Campus Assistant · {ai_data.get('language','')}")
     return embed
 
@@ -579,6 +619,84 @@ async def note_cmd(interaction: discord.Interaction, text: str):
     await process_and_save(interaction, text.strip(), source_type="text")
 
 
+@tree.command(name="reading_note", description="Save a reading note separately from normal text")
+@app_commands.describe(text="Your reading note")
+async def reading_note_cmd(interaction: discord.Interaction, text: str):
+    await interaction.response.defer(thinking=True)
+    ai_data = categorize_with_ai(text.strip(), source_type="note")
+    ai_data["category"] = "Reading Note"
+    ai_data["content_type"] = "Reading Note"
+    ai_data["confidence"] = max(float(ai_data.get("confidence", 0.7)), 0.9)
+    ai_data["needs_review"] = False
+    save_to_notion(ai_data, "", text.strip())
+    await interaction.followup.send(embed=build_embed(ai_data, "", "text"))
+
+
+@tree.command(name="schedule", description="Save a schedule, reminder, routine, or planned task")
+@app_commands.describe(text="Example: tomorrow 8pm read paper")
+async def schedule_cmd(interaction: discord.Interaction, text: str):
+    await interaction.response.defer(thinking=True)
+    ai_data = categorize_with_ai(text.strip(), source_type="schedule")
+    ai_data["category"] = "Schedule"
+    ai_data["content_type"] = "Schedule"
+    ai_data["action"] = "Add to schedule"
+    ai_data["confidence"] = max(float(ai_data.get("confidence", 0.7)), 0.9)
+    ai_data["needs_review"] = False
+    save_to_notion(ai_data, "", text.strip())
+    await interaction.followup.send(embed=build_embed(ai_data, "", "text"))
+
+
+@tree.command(name="ask", description="Ask the assistant without saving to Notion")
+@app_commands.describe(question="Your question")
+async def ask_cmd(interaction: discord.Interaction, question: str):
+    await interaction.response.defer(thinking=True)
+    try:
+        answer = answer_with_ai(question.strip(), playful=False)
+        await interaction.followup.send(answer[:1900])
+    except Exception as e:
+        await interaction.followup.send(f"❌ Answer error: `{str(e)}`")
+
+
+@tree.command(name="chat", description="Casual/fun chat without saving to Notion")
+@app_commands.describe(message="Say anything")
+async def chat_cmd(interaction: discord.Interaction, message: str):
+    await interaction.response.defer(thinking=True)
+    try:
+        answer = answer_with_ai(message.strip(), playful=True)
+        await interaction.followup.send(answer[:1900])
+    except Exception as e:
+        await interaction.followup.send(f"❌ Chat error: `{str(e)}`")
+
+
+@tree.command(name="fixcategory", description="Fix the category of your latest saved item")
+@app_commands.describe(target="Use latest for now", category="New category name, e.g. Scholarship")
+async def fixcategory_cmd(interaction: discord.Interaction, target: str, category: str):
+    await interaction.response.defer(thinking=True)
+    category = normalize_category(category)
+    if category not in CATEGORIES:
+        await interaction.followup.send(f"Unknown category. Use one of:\n`{', '.join(CATEGORIES)}`")
+        return
+    if target.lower() != "latest":
+        await interaction.followup.send("For now I can fix only `latest`. Example: `/fixcategory latest Scholarship`")
+        return
+    try:
+        results = notion.databases.query(
+            database_id=NOTION_DB_ID,
+            sorts=[{"property": "Saved At", "direction": "descending"}],
+            page_size=1
+        )["results"]
+        if not results:
+            await interaction.followup.send("No saved item found.")
+            return
+        props = {"Category": {"select": {"name": category}}}
+        add_prop_if_exists(props, "Needs Review", {"checkbox": False})
+        add_prop_if_exists(props, "Confidence", {"number": 1.0})
+        notion.pages.update(page_id=results[0]["id"], properties=props)
+        await interaction.followup.send(f"✅ Latest item category updated to `{category}`.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Category update error: `{str(e)}`")
+
+
 @tree.command(name="find", description="Search your saved content with natural language")
 @app_commands.describe(query="What are you looking for? (e.g. scholarship UK 2025, free AI tools)")
 async def find_cmd(interaction: discord.Interaction, query: str):
@@ -628,9 +746,10 @@ async def find_cmd(interaction: discord.Interaction, query: str):
 async def list_cmd(interaction: discord.Interaction, category: str):
     await interaction.response.defer(thinking=True)
     try:
+        category = normalize_category(category)
         results = notion.databases.query(
             database_id=NOTION_DB_ID,
-            filter={"property": "Category", "select": {"equals": category.title()}},
+            filter={"property": "Category", "select": {"equals": category}},
             sorts=[{"property": "Saved At", "direction": "descending"}],
             page_size=10
         )["results"]
@@ -650,8 +769,8 @@ async def list_cmd(interaction: discord.Interaction, category: str):
             lines.append(f"• [{title}]({url_val})" if url_val else f"• {title}")
 
         e = discord.Embed(
-            title=f"{category.title()} — {len(results)} saved",
-            color=CATEGORY_COLORS.get(category.title(), 0x5865F2)
+            title=f"{category} — {len(results)} saved",
+            color=CATEGORY_COLORS.get(category, 0x5865F2)
         )
         e.description = "\n".join(lines)
         await interaction.followup.send(embed=e)
@@ -741,6 +860,11 @@ async def help_cmd(interaction: discord.Interaction):
     e = discord.Embed(title="🤖 Campus Assistant — Commands", color=0x5865F2)
     e.add_field(name="/save [url]", value="Save any link — YouTube, articles, research papers\nFacebook/Instagram links: saves what it can", inline=False)
     e.add_field(name="/note [text]", value="**Best for Facebook posts** — copy the post text and paste here\nAlso for LinkedIn, TikTok captions, any copied text", inline=False)
+    e.add_field(name="/reading_note [text]", value="Save study notes separately as Reading Note", inline=False)
+    e.add_field(name="/schedule [text]", value="Save routines, deadlines, reminders, or tasks", inline=False)
+    e.add_field(name="/ask [question]", value="Ask something without saving it", inline=False)
+    e.add_field(name="/chat [message]", value="Casual/fun chat without saving it", inline=False)
+    e.add_field(name="/fixcategory latest [category]", value="Fix the latest saved item's class if AI was unsure", inline=False)
     e.add_field(name="📸 Drop an image", value="Upload any image or photocard directly in this channel\nBot reads all text (Bangla + English) using AI vision", inline=False)
     e.add_field(name="/find [query]", value="Search your saved content: `/find scholarship UK`", inline=False)
     e.add_field(name="/list [category]", value="List by category: `/list Scholarship` `/list Video`", inline=False)
